@@ -1,44 +1,36 @@
-# Параметры
-$registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-$oldValues = @{}
+# Указываем имя журнала, куда Sysmon записывает события
+$logName = "Microsoft-Windows-Sysmon/Operational"
 
-# Функция для сравнения новых и старых значений
-function Compare-RegistryValues {
-    param(
-        [string]$path
-    )
+# Задаем временной диапазон: последние 2 минуты
+$startTime = (Get-Date).AddMinutes(-2)  # Время начала (2 минуты назад)
+$endTime = Get-Date                     # Текущее время
 
-    # Получение новых значений
-    $newValues = Get-ChildItem -Path $path -ErrorAction SilentlyContinue | ForEach-Object {
-        $name = $_.Name
-        $value = $_.GetValue("DisplayName")
-        [PSCustomObject]@{ Name = $name; Value = $value }
-    }
+# Получаем события из журнала за последние 2 минуты
+$events = Get-WinEvent -LogName $logName -FilterXPath "*[System[TimeCreated[@SystemTime >= '$($startTime.ToUniversalTime().ToString("o"))' and @SystemTime <= '$($endTime.ToUniversalTime().ToString("o"))']]]" | Where-Object { $_.Id -eq 12 }
 
-    # Сравнение новых и старых значений
-    foreach ($newValue in $newValues) {
-        if ($oldValues.ContainsKey($newValue.Name)) {
-            if ($oldValues[$newValue.Name] -ne $newValue.Value) {
-                Write-Output "Изменено: $($newValue.Name) - $($newValue.Value)"
-            }
-            $oldValues[$newValue.Name] = $newValue.Value
-        } else {
-            Write-Output "Новое: $($newValue.Name) - $($newValue.Value)"
-            $oldValues[$newValue.Name] = $newValue.Value
-        }
-    }
+# Фильтруем события, чтобы найти только те, которые связаны с разделом Uninstall
+$uninstallEvents = $events | ForEach-Object {
+    $eventXml = ([xml]$_.ToXml()).Event.EventData.Data
+    $targetObject = ($eventXml | Where-Object { $_.Name -eq "TargetObject" }).'#text'
+    $details = ($eventXml | Where-Object { $_.Name -eq "Details" }).'#text'
+    $processName = ($eventXml | Where-Object { $_.Name -eq "ProcessName" }).'#text'
+    $eventType = ($eventXml | Where-Object { $_.Name -eq "EventType" }).'#text'
 
-    # Удаление старых значений, которые больше не существуют
-    foreach ($oldKey in $oldValues.Keys) {
-        if (-not ($newValues | Where-Object { $_.Name -eq $oldKey })) {
-            Write-Output "Удалено: $oldKey - $($oldValues[$oldKey])"
-            $oldValues.Remove($oldKey)
+    # Проверяем, относится ли событие к разделу Uninstall
+    if ($targetObject -match "\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\") {
+        [PSCustomObject]@{
+            TimeCreated   = $_.TimeCreated
+            EventType     = $eventType
+            TargetObject  = $targetObject
+            Details       = $details
+            ProcessName   = $processName
         }
     }
 }
 
-# Мониторинг значения реестра
-while ($true) {
-    Compare-RegistryValues -path $registryPath
-    Start-Sleep -Seconds 5
+# Выводим результаты
+if ($uninstallEvents) {
+    $uninstallEvents | Format-Table -AutoSize
+} else {
+    Write-Host "Событий Uninstall за последние 2 минуты не обнаружено."
 }
